@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+sentence-transformers
+gradio
+datasets
+scikit-learn
+python-multipart

@@ -3,13 +3,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import gradio as gr
 import uvicorn
-from scanner import scanner
+from scanner import PromptInjectionScanner 
 
 app = FastAPI(title="LLM Firewall - Prompt Injection Detector")
 
 class PromptRequest(BaseModel):
     prompt: str
     model: str = "gpt-4o"  # For future proxy use
+
+scanner = PromptInjectionScanner()
 
 @app.post("/guard")
 async def guard_prompt(request: PromptRequest):

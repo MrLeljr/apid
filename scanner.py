@@ -18,11 +18,12 @@ class PromptInjectionScanner:
         self,
         decision_threshold: float = 0.55,
         dataset_path: Optional[str] = None,
-        model_name: str = "all-MiniLM-L6-v2",
-        use_transformer_embeddings: bool = False,
+        model_name: str = "paraphrase-mpnet-base-v2",
+        use_transformer_embeddings: bool = True,
     ):
         self.decision_threshold = decision_threshold
         self.dataset_path = Path(dataset_path) if dataset_path else DEFAULT_DATASET_PATH
+        self.preferred_model_name = model_name
         self.classifier = LogisticRegression(max_iter=1000, class_weight="balanced")
         self.label_names = {0: "benign", 1: "prompt_injection"}
         self.training_examples: List[Dict[str, str | int]] = []
@@ -39,7 +40,7 @@ class PromptInjectionScanner:
         if use_transformer_embeddings:
             try:
                 self.model = SentenceTransformer(model_name, local_files_only=True)
-                self.embedding_backend = "sentence_transformer"
+                self.embedding_backend = f"sentence_transformer:{model_name}"
             except Exception:
                 self.model = None
 
@@ -103,6 +104,7 @@ class PromptInjectionScanner:
                 {
                     "text": self.training_texts[idx],
                     "label": self.label_names[self.training_labels[idx]],
+                    "source": self.training_examples[idx].get("source", "local"),
                     "similarity": round(float(similarities[idx]), 4),
                 }
             )
@@ -134,6 +136,7 @@ class PromptInjectionScanner:
             "severity": "HIGH" if malicious_probability > 0.85 else "MEDIUM" if malicious_probability > 0.6 else "LOW",
             "explanation": {
                 "model": f"{self.embedding_backend}_logistic_regression",
+                "preferred_model": self.preferred_model_name,
                 "threshold": self.decision_threshold,
                 "dataset_path": str(self.dataset_path),
                 "training_samples": len(self.training_examples),

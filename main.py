@@ -39,9 +39,12 @@ async def proxy_to_llm(request: PromptRequest):
 # Gradio Demo
 def demo_scan(prompt: str):
     result = scanner.scan(prompt)
-    color = "red" if result["is_malicious"] else "green"
+    classifier = result["layers"]["layer_1_classifier"]
+    semantic = result["layers"]["layer_2_semantic"]
     return (
         f"**Risk Score:** {result['risk_score']}\n"
+        f"**Layer 1 - Classifier:** {classifier['score']} (triggered={classifier['triggered']})\n"
+        f"**Layer 2 - Semantic:** {semantic['score']} (triggered={semantic['triggered']})\n"
         f"**Recommendation:** {result['recommendation']}\n"
         f"**Explanation:** {result['explanation']}"
     )

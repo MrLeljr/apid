@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -34,6 +35,11 @@ class PromptInjectionScanner:
         self.label_names = {0: "benign", 1: "prompt_injection"}
         self.training_examples: List[Dict[str, str | int]] = []
         self._is_trained = False
+        self.training_texts: List[str] = []
+        self.training_labels: List[int] = []
+        self.training_embeddings: np.ndarray | None = None
+        self._malicious_indices = np.array([], dtype=int)
+        self._benign_indices = np.array([], dtype=int)
         self.embedding_backend = "hashing_vectorizer"
         self.vectorizer = HashingVectorizer(
             n_features=2048,
@@ -92,6 +98,9 @@ class PromptInjectionScanner:
         self.training_texts = texts
         self.training_labels = labels
         self.training_embeddings = embeddings
+        label_array = np.asarray(labels)
+        self._malicious_indices = np.flatnonzero(label_array == 1)
+        self._benign_indices = np.flatnonzero(label_array == 0)
         self._is_trained = True
 
     def train_from_file(self, dataset_path: Path) -> None:
@@ -123,21 +132,15 @@ class PromptInjectionScanner:
     def _semantic_layer(self, similarities: np.ndarray, neighbors: List[Dict[str, object]]) -> Dict[str, object]:
         malicious_neighbors = [n for n in neighbors if n["label"] == "prompt_injection"]
         benign_neighbors = [n for n in neighbors if n["label"] == "benign"]
-        malicious_scores = sorted(
-            [float(similarities[idx]) for idx, label in enumerate(self.training_labels) if label == 1],
-            reverse=True,
-        )
-        benign_scores = sorted(
-            [float(similarities[idx]) for idx, label in enumerate(self.training_labels) if label == 0],
-            reverse=True,
-        )
+        malicious_scores = np.sort(similarities[self._malicious_indices])[::-1]
+        benign_scores = np.sort(similarities[self._benign_indices])[::-1]
 
-        top_malicious_similarity = malicious_scores[0] if malicious_scores else 0.0
-        top_benign_similarity = benign_scores[0] if benign_scores else 0.0
+        top_malicious_similarity = float(malicious_scores[0]) if malicious_scores.size else 0.0
+        top_benign_similarity = float(benign_scores[0]) if benign_scores.size else 0.0
         malicious_top_k = malicious_scores[: self.semantic_top_k]
         benign_top_k = benign_scores[: self.semantic_top_k]
-        malicious_centroid_similarity = float(np.mean(malicious_top_k)) if malicious_top_k else 0.0
-        benign_centroid_similarity = float(np.mean(benign_top_k)) if benign_top_k else 0.0
+        malicious_centroid_similarity = float(np.mean(malicious_top_k)) if malicious_top_k.size else 0.0
+        benign_centroid_similarity = float(np.mean(benign_top_k)) if benign_top_k.size else 0.0
         semantic_margin = malicious_centroid_similarity - benign_centroid_similarity
 
         semantic_hit = (
@@ -164,6 +167,75 @@ class PromptInjectionScanner:
             "benign_counterexample": benign_neighbors[0]["text"] if benign_neighbors else None,
         }
 
+    def _behavioral_context_layer(self, prompt: str, context: Optional[str] = None) -> Dict[str, object]:
+        prompt_lower = prompt.lower()
+
+        reset_patterns = [
+            r"\bignore (all|any|the) previous (instructions|messages|context)\b",
+            r"\bforget (all|any|the) previous (instructions|messages|context)\b",
+            r"\breset (the )?(conversation|chat|context|memory)\b",
+            r"\bstart over\b",
+            r"\bnew instructions\b",
+            r"\bfrom now on\b",
+            r"\byou are now\b",
+            r"\bdisregard (all|any|the) (earlier|prior|previous) (instructions|messages|context)\b",
+        ]
+        prior_message_reference_patterns = [
+            r"\bprevious messages\b",
+            r"\bearlier messages\b",
+            r"\bprior messages\b",
+            r"\babove conversation\b",
+            r"\bchat history\b",
+            r"\bconversation history\b",
+            r"\bwhat did i say earlier\b",
+            r"\bas mentioned above\b",
+        ]
+        contradiction_patterns = [
+            r"\bignore the system prompt\b",
+            r"\boverride (your|all) instructions\b",
+            r"\bbypass (safety|policy|guardrails|filters)\b",
+            r"\bdo not follow (the )?(previous|prior|earlier) instructions\b",
+            r"\bpretend (that )?(the )?(previous|prior) instructions do not exist\b",
+        ]
+
+        matched_signals: List[str] = []
+        score = 0.0
+
+        for pattern in reset_patterns:
+            if re.search(pattern, prompt_lower):
+                matched_signals.append(f"reset_attempt:{pattern}")
+                score += 0.35
+
+        suspicious_history_reference = False
+        for pattern in prior_message_reference_patterns:
+            if re.search(pattern, prompt_lower):
+                suspicious_history_reference = context is None or context.strip() == ""
+                if suspicious_history_reference:
+                    matched_signals.append(f"suspicious_history_reference:{pattern}")
+                    score += 0.25
+
+        for pattern in contradiction_patterns:
+            if re.search(pattern, prompt_lower):
+                matched_signals.append(f"instruction_override:{pattern}")
+                score += 0.35
+
+        if context and re.search(r"\b(ignore|forget|disregard)\b", prompt_lower):
+            matched_signals.append("context_conflict:prompt_attempts_to_override_existing_context")
+            score += 0.2
+
+        score = min(1.0, score)
+        triggered = score >= 0.4
+
+        return {
+            "name": "Behavioral/contextual heuristics",
+            "model": "rule_based_context_awareness",
+            "triggered": triggered,
+            "score": round(score, 4),
+            "history_awareness_flag": bool(matched_signals),
+            "suspicious_history_reference": suspicious_history_reference,
+            "matched_signals": matched_signals,
+        }
+
     def scan(self, prompt: str, context: Optional[str] = None) -> Dict[str, object]:
         if not self._is_trained:
             raise RuntimeError("Scanner is not trained. Load a labeled dataset before scanning.")
@@ -175,9 +247,15 @@ class PromptInjectionScanner:
         classifier_hit = malicious_probability >= self.decision_threshold
         similarities, neighbors = self._rank_neighbors(prompt_embedding)
         semantic_layer = self._semantic_layer(similarities, neighbors)
+        behavioral_layer = self._behavioral_context_layer(prompt=prompt, context=context)
         semantic_hit = bool(semantic_layer["triggered"])
-        is_malicious = classifier_hit or semantic_hit
-        final_score = max(malicious_probability, float(semantic_layer["score"]))
+        behavioral_hit = bool(behavioral_layer["triggered"])
+        is_malicious = classifier_hit or semantic_hit or behavioral_hit
+        final_score = max(
+            malicious_probability,
+            float(semantic_layer["score"]),
+            float(behavioral_layer["score"]),
+        )
 
         return {
             "prompt_preview": prompt[:250] + "..." if len(prompt) > 250 else prompt,
@@ -197,6 +275,7 @@ class PromptInjectionScanner:
                     "model": self.embedding_backend,
                     **semantic_layer,
                 },
+                "layer_3_behavioral_contextual": behavioral_layer,
             },
             "explanation": {
                 "model": "multi_layer_detection",
@@ -210,6 +289,8 @@ class PromptInjectionScanner:
                 "matched_signal": semantic_layer["matched_signal"],
                 "benign_counterexample": semantic_layer["benign_counterexample"],
                 "top_neighbors": semantic_layer["top_neighbors"],
+                "history_awareness_flag": behavioral_layer["history_awareness_flag"],
+                "behavioral_signals": behavioral_layer["matched_signals"],
             },
             "recommendation": "BLOCK" if is_malicious else "ALLOW",
         }

@@ -1,0 +1,11 @@
+services:
+  apid:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      APID_API_KEYS: demo-key
+      APID_UPSTREAM_MODE: ollama
+      APID_UPSTREAM_URL: http://host.docker.internal:11434
+      APID_UPSTREAM_MODEL: llama3.1
+      APID_SCAN_OUTPUT: "true"

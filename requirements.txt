@@ -4,3 +4,5 @@ sentence-transformers
 gradio
 scikit-learn
 python-multipart
+httpx
+joblib

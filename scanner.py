@@ -8,12 +8,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Pattern, Sequence
 
 import numpy as np
+from joblib import dump, load
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.linear_model import LogisticRegression
 
 
 DEFAULT_DATASET_PATH = Path(__file__).resolve().parent / "training_data" / "prompt_injection_dataset.json"
+DEFAULT_ARTIFACT_PATH = Path(__file__).resolve().parent / "artifacts" / "scanner.joblib"
 RESET_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
@@ -63,6 +65,7 @@ class PromptInjectionScanner:
         semantic_margin_threshold: float = 0.08,
         semantic_top_k: int = 3,
         dataset_path: Optional[str] = None,
+        artifact_path: Optional[str] = None,
         model_name: str = "paraphrase-mpnet-base-v2",
         use_transformer_embeddings: bool = True,
     ):
@@ -73,6 +76,7 @@ class PromptInjectionScanner:
         self.semantic_margin_threshold = semantic_margin_threshold
         self.semantic_top_k = semantic_top_k
         self.dataset_path = Path(dataset_path) if dataset_path else DEFAULT_DATASET_PATH
+        self.artifact_path = Path(artifact_path) if artifact_path else DEFAULT_ARTIFACT_PATH
         self.preferred_model_name = model_name
         self.classifier = LogisticRegression(max_iter=1000, class_weight="balanced")
         self.label_names = {0: "benign", 1: "prompt_injection"}
@@ -99,7 +103,8 @@ class PromptInjectionScanner:
             except Exception:
                 self.model = None
 
-        self.train_from_file(self.dataset_path)
+        if not self.load_artifacts():
+            self.train_from_file(self.dataset_path)
 
     def load_examples(self, dataset_path: Path) -> List[Dict[str, str | int]]:
         """Load and validate labeled samples from disk."""
@@ -149,11 +154,73 @@ class PromptInjectionScanner:
         self._malicious_indices = np.flatnonzero(label_array == 1)
         self._benign_indices = np.flatnonzero(label_array == 0)
         self._is_trained = True
+        self.save_artifacts()
 
     def train_from_file(self, dataset_path: Path) -> None:
         """Train the scanner from a JSON dataset file."""
 
         self.train(self.load_examples(dataset_path))
+
+    def _artifact_metadata(self) -> Dict[str, object]:
+        """Describe the training inputs so cached artifacts can be validated."""
+
+        dataset_stat = self.dataset_path.stat()
+        return {
+            "dataset_path": str(self.dataset_path.resolve()),
+            "dataset_mtime_ns": dataset_stat.st_mtime_ns,
+            "decision_threshold": self.decision_threshold,
+            "semantic_similarity_threshold": self.semantic_similarity_threshold,
+            "semantic_margin_threshold": self.semantic_margin_threshold,
+            "semantic_top_k": self.semantic_top_k,
+            "preferred_model_name": self.preferred_model_name,
+            "embedding_backend": self.embedding_backend,
+        }
+
+    def save_artifacts(self) -> None:
+        """Persist the trained classifier and cached embeddings for faster startup."""
+
+        self.artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        dump(
+            {
+                "metadata": self._artifact_metadata(),
+                "classifier": self.classifier,
+                "vectorizer": self.vectorizer,
+                "label_names": self.label_names,
+                "training_examples": self.training_examples,
+                "training_texts": self.training_texts,
+                "training_labels": self.training_labels,
+                "training_embeddings": self.training_embeddings,
+                "malicious_indices": self._malicious_indices,
+                "benign_indices": self._benign_indices,
+            },
+            self.artifact_path,
+        )
+
+    def load_artifacts(self) -> bool:
+        """Load cached artifacts when they match the current dataset and thresholds."""
+
+        if not self.artifact_path.exists() or not self.dataset_path.exists():
+            return False
+
+        try:
+            payload = load(self.artifact_path)
+        except Exception:
+            return False
+
+        if payload.get("metadata") != self._artifact_metadata():
+            return False
+
+        self.classifier = payload["classifier"]
+        self.vectorizer = payload["vectorizer"]
+        self.label_names = payload["label_names"]
+        self.training_examples = list(payload["training_examples"])
+        self.training_texts = list(payload["training_texts"])
+        self.training_labels = list(payload["training_labels"])
+        self.training_embeddings = np.asarray(payload["training_embeddings"], dtype=np.float32)
+        self._malicious_indices = np.asarray(payload["malicious_indices"], dtype=int)
+        self._benign_indices = np.asarray(payload["benign_indices"], dtype=int)
+        self._is_trained = True
+        return True
 
     def _embed_texts(self, texts: Sequence[str]) -> np.ndarray:
         """Embed texts with the preferred backend and normalize dtypes."""

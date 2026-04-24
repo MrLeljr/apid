@@ -121,7 +121,7 @@ py -m unittest discover -s tests -v
 - `tests/`: gateway and persistence smoke tests
 - `training_data/prompt_injection_dataset.json`: labeled local dataset
 
-## Current Limitations/ Will be fixed asap!!
+## Current Limitations/ Will be fixed asap(Top priority)!!
 
 - Rate limiting is in-memory, so it is per-process rather than distributed
 - Output scanning is only applied to non-streaming responses

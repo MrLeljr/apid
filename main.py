@@ -45,6 +45,7 @@ class Settings:
         self.scan_output = os.getenv("APID_SCAN_OUTPUT", "true").strip().lower() in {"1", "true", "yes", "on"}
         self.max_attachment_bytes = max(1024, int(os.getenv("APID_MAX_ATTACHMENT_BYTES", str(5 * 1024 * 1024))))
         self.max_attachment_text_chars = max(256, int(os.getenv("APID_MAX_ATTACHMENT_TEXT_CHARS", "12000")))
+        self.enable_demo = os.getenv("APID_ENABLE_DEMO", "true").strip().lower() in {"1", "true", "yes", "on"}
         self.use_transformer_embeddings = os.getenv("APID_USE_TRANSFORMER_EMBEDDINGS", "true").strip().lower() in {
             "1",
             "true",
@@ -557,7 +558,9 @@ def create_app() -> FastAPI:
         log_scan_event(request, endpoint="/proxy", decision="forwarded", result=response)
         return JSONResponse(status_code=upstream_response.status_code, content=data)
 
-    return gr.mount_gradio_app(api, build_demo(), path="/demo")
+    if settings.enable_demo:
+        return gr.mount_gradio_app(api, build_demo(), path="/demo")
+    return api
 
 
 app = create_app()

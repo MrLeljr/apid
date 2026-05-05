@@ -84,6 +84,7 @@ Important settings:
 - `APID_SCAN_OUTPUT`: scan non-streaming upstream responses before returning them
 - `APID_MAX_ATTACHMENT_BYTES`: maximum decoded size per inspected attachment, default `5242880`
 - `APID_MAX_ATTACHMENT_TEXT_CHARS`: maximum printable hidden text extracted per attachment, default `12000`
+- `APID_ENABLE_DEMO`: mount the Gradio demo UI at `/demo`, default `true`
 - `APID_USE_TRANSFORMER_EMBEDDINGS`: disable with `false` for lighter local/test runs
 
 ## API Examples

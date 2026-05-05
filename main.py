@@ -15,11 +15,12 @@ from urllib.parse import urljoin
 import gradio as gr
 import httpx
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from file_security import FileCandidate, inspect_file_candidate, iter_file_candidates
 from scanner import PromptInjectionScanner
 
 
@@ -42,6 +43,8 @@ class Settings:
         self.upstream_api_key = os.getenv("APID_UPSTREAM_API_KEY", "").strip()
         self.request_timeout = float(os.getenv("APID_UPSTREAM_TIMEOUT_SECONDS", "120"))
         self.scan_output = os.getenv("APID_SCAN_OUTPUT", "true").strip().lower() in {"1", "true", "yes", "on"}
+        self.max_attachment_bytes = max(1024, int(os.getenv("APID_MAX_ATTACHMENT_BYTES", str(5 * 1024 * 1024))))
+        self.max_attachment_text_chars = max(256, int(os.getenv("APID_MAX_ATTACHMENT_TEXT_CHARS", "12000")))
         self.use_transformer_embeddings = os.getenv("APID_USE_TRANSFORMER_EMBEDDINGS", "true").strip().lower() in {
             "1",
             "true",
@@ -218,6 +221,74 @@ def extract_prompt_context(payload: dict[str, Any]) -> tuple[str, str | None]:
     return prompt, normalize_context(context)
 
 
+def inspect_attachment_candidates(candidates: list[FileCandidate]) -> dict[str, Any]:
+    """Scan decoded file candidates and return an allow/block decision."""
+
+    inspected: list[dict[str, Any]] = []
+    blocked_findings: list[dict[str, Any]] = []
+
+    for candidate in candidates:
+        inspection = inspect_file_candidate(
+            candidate,
+            max_bytes=settings.max_attachment_bytes,
+            max_extracted_chars=settings.max_attachment_text_chars,
+        )
+        extracted_text = sanitize_text(inspection.pop("extracted_text", ""))
+        text_scan = None
+        if extracted_text:
+            text_scan = scanner.scan(extracted_text)
+            inspection["text_scan"] = {
+                "is_malicious": text_scan["is_malicious"],
+                "risk_score": text_scan["risk_score"],
+                "severity": text_scan["severity"],
+                "recommendation": text_scan["recommendation"],
+            }
+
+        if inspection["findings"]:
+            blocked_findings.append({"path": inspection["path"], "findings": inspection["findings"]})
+        if text_scan and text_scan["is_malicious"]:
+            blocked_findings.append(
+                {
+                    "path": inspection["path"],
+                    "findings": [
+                        {
+                            "type": "embedded_prompt_injection",
+                            "detail": "attachment contains hidden text that matched the prompt-injection scanner",
+                        }
+                    ],
+                }
+            )
+
+        inspected.append(inspection)
+
+    if blocked_findings:
+        return {
+            "status": "blocked",
+            "reason": "Potential malicious content detected in attached file data",
+            "is_malicious": True,
+            "risk_score": 1.0,
+            "severity": "HIGH",
+            "recommendation": "BLOCK",
+            "attachments": inspected,
+            "findings": blocked_findings,
+        }
+
+    return {
+        "status": "allowed",
+        "is_malicious": False,
+        "risk_score": 0.0,
+        "severity": "LOW",
+        "recommendation": "ALLOW",
+        "attachments": inspected,
+    }
+
+
+def inspect_payload_attachments(payload: dict[str, Any]) -> dict[str, Any]:
+    """Scan decoded file-like payloads before they are sent to an upstream model."""
+
+    return inspect_attachment_candidates(list(iter_file_candidates(payload)))
+
+
 def detect_upstream_mode() -> str:
     """Resolve which upstream API flavor the gateway should speak."""
 
@@ -365,6 +436,54 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=403, content=response)
         return response
 
+    @api.post("/guard/files")
+    async def guard_files(
+        request: Request,
+        files: list[UploadFile] = File(...),
+        prompt: str = Form(default=""),
+        context: str | None = Form(default=None),
+        x_api_key: str | None = Header(default=None),
+    ):
+        identity = require_api_key(x_api_key) or (request.client.host if request.client else "anonymous")
+        enforce_rate_limit(identity)
+
+        prompt_text = sanitize_text(prompt)
+        prompt_result = None
+        if prompt_text:
+            prompt_result = scanner.scan(prompt_text, context=normalize_context(context))
+            if prompt_result["is_malicious"]:
+                response = build_scan_response(prompt_result, allowed_status="allowed")
+                log_scan_event(request, endpoint="/guard/files", decision="blocked_input", result=response)
+                return JSONResponse(status_code=403, content=response)
+
+        candidates: list[FileCandidate] = []
+        for index, uploaded_file in enumerate(files):
+            data = await uploaded_file.read(settings.max_attachment_bytes + 1)
+            candidates.append(
+                FileCandidate(
+                    path=f"files[{index}]",
+                    data=data,
+                    mime_type=uploaded_file.content_type,
+                    filename=uploaded_file.filename,
+                )
+            )
+
+        attachment_result = inspect_attachment_candidates(candidates)
+        if attachment_result["is_malicious"]:
+            log_scan_event(request, endpoint="/guard/files", decision="blocked_attachment", result=attachment_result)
+            return JSONResponse(status_code=403, content=attachment_result)
+
+        response: dict[str, Any] = {
+            "status": "allowed",
+            "is_malicious": False,
+            "risk_score": prompt_result["risk_score"] if prompt_result else attachment_result["risk_score"],
+            "severity": prompt_result["severity"] if prompt_result else attachment_result["severity"],
+            "recommendation": "ALLOW",
+            "attachments": attachment_result["attachments"],
+        }
+        log_scan_event(request, endpoint="/guard/files", decision="allowed", result=response)
+        return response
+
     @api.post("/proxy")
     async def proxy_to_llm(request: Request, x_api_key: str | None = Header(default=None)):
         identity = require_api_key(x_api_key) or (request.client.host if request.client else "anonymous")
@@ -377,6 +496,11 @@ def create_app() -> FastAPI:
 
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Proxy request body must be a JSON object.")
+
+        attachment_result = inspect_payload_attachments(payload)
+        if attachment_result["is_malicious"]:
+            log_scan_event(request, endpoint="/proxy", decision="blocked_attachment", result=attachment_result)
+            return JSONResponse(status_code=403, content=attachment_result)
 
         prompt, context = extract_prompt_context(payload)
         result = scanner.scan(prompt, context=context)

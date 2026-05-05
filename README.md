@@ -5,8 +5,10 @@ APID is a FastAPI-based prompt-injection firewall that can sit in front of an LL
 It now supports:
 
 - `POST /guard` for scan-only decisions
+- `POST /guard/files` for scan-only file upload inspection
 - `POST /proxy` as a real reverse proxy for OpenAI-compatible chat endpoints and local Ollama
 - Input blocking plus optional output scanning on non-streaming responses
+- Attachment preflight checks for base64/data-URL images, PDFs, Office/archive-like files, and executable masquerades
 - API-key auth, in-memory rate limiting, JSON request logs, and persisted scanner artifacts
 - A Gradio demo mounted at `/demo`
 
@@ -19,6 +21,14 @@ Each request is evaluated by three layers:
 - Rule-based override and conversation-conflict heuristics
 
 If any layer triggers, APID blocks the request with `403`.
+
+For file-bearing requests, APID also performs an attachment preflight before forwarding traffic upstream:
+
+- Decodes OpenAI-style data URLs and base64 file blocks
+- Extracts printable hidden text from binary content and runs it through the prompt-injection scanner
+- Blocks active PDF/Office/archive signatures such as JavaScript actions, launch actions, embedded files, macros, and scripts
+- Blocks executable payloads that are declared or named as images/PDFs
+- Enforces decoded attachment size limits
 
 ## Quick Start
 
@@ -72,6 +82,8 @@ Important settings:
 - `APID_UPSTREAM_API_KEY`: bearer token for OpenAI-compatible upstreams
 - `APID_UPSTREAM_MODEL`: default model if the caller omits one
 - `APID_SCAN_OUTPUT`: scan non-streaming upstream responses before returning them
+- `APID_MAX_ATTACHMENT_BYTES`: maximum decoded size per inspected attachment, default `5242880`
+- `APID_MAX_ATTACHMENT_TEXT_CHARS`: maximum printable hidden text extracted per attachment, default `12000`
 - `APID_USE_TRANSFORMER_EMBEDDINGS`: disable with `false` for lighter local/test runs
 
 ## API Examples
@@ -95,6 +107,15 @@ curl -X POST http://127.0.0.1:8000/proxy ^
 ```
 
 Streaming is supported by passing `"stream": true`.
+
+Scan uploaded files before they are used with a model:
+
+```bash
+curl -X POST http://127.0.0.1:8000/guard/files ^
+  -H "X-API-Key: demo-key" ^
+  -F "prompt=Summarize this document" ^
+  -F "files=@invoice.pdf;type=application/pdf"
+```
 
 ## Docker
 

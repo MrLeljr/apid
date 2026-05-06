@@ -136,6 +136,10 @@ Run the local smoke tests:
 py -m unittest discover -s tests -v
 ```
 
+## License
+
+APID is licensed under the Apache License 2.0. See `LICENSE` for details.
+
 ## Project Layout
 
 - `main.py`: FastAPI app, proxy logic, auth, logging, and demo wiring

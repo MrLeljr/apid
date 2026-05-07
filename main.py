@@ -360,6 +360,87 @@ def extract_response_text(response_json: dict[str, Any], *, mode: str) -> str:
     return ""
 
 
+def extract_stream_text_delta(event_json: dict[str, Any], *, mode: str) -> str:
+    """Pull assistant text from one streaming upstream event."""
+
+    if mode == "ollama":
+        message = event_json.get("message", {})
+        if isinstance(message, dict):
+            content = flatten_content(message.get("content"))
+            if content:
+                return content
+        return flatten_content(event_json.get("response"))
+
+    choices = event_json.get("choices", [])
+    if not choices:
+        return ""
+    delta = choices[0].get("delta", {})
+    if isinstance(delta, dict):
+        content = flatten_content(delta.get("content"))
+        if content:
+            return content
+    message = choices[0].get("message", {})
+    if isinstance(message, dict):
+        return flatten_content(message.get("content"))
+    return ""
+
+
+def extract_stream_chunk_text(chunk: bytes, *, mode: str) -> str:
+    """Extract assistant text from complete SSE or JSON-lines chunks."""
+
+    try:
+        decoded = chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+    deltas: list[str] = []
+    for raw_line in decoded.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("data:"):
+            line = line.removeprefix("data:").strip()
+        if not line or line == "[DONE]":
+            continue
+        try:
+            event_json = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        deltas.append(extract_stream_text_delta(event_json, mode=mode))
+    return "".join(delta for delta in deltas if delta)
+
+
+def pop_complete_stream_frames(buffer: bytes, *, mode: str) -> tuple[list[bytes], bytes]:
+    """Split a stream buffer into complete provider events plus leftover bytes."""
+
+    separator = b"\n" if mode == "ollama" else b"\n\n"
+    frames: list[bytes] = []
+    start = 0
+    while True:
+        end = buffer.find(separator, start)
+        if end == -1:
+            break
+        frame_end = end + len(separator)
+        frames.append(buffer[start:frame_end])
+        start = frame_end
+    return frames, buffer[start:]
+
+
+def build_stream_block_event(blocked: dict[str, Any], *, mode: str) -> bytes:
+    """Return a provider-shaped terminal stream event for blocked output."""
+
+    payload = {
+        "status": "blocked",
+        "reason": blocked["reason"],
+        "risk_score": blocked["risk_score"],
+        "severity": blocked["severity"],
+        "recommendation": blocked["recommendation"],
+    }
+    if mode == "ollama":
+        return (json.dumps({"done": True, "error": payload}) + "\n").encode("utf-8")
+    return f"data: {json.dumps({'error': payload})}\n\ndata: [DONE]\n\n".encode("utf-8")
+
+
 def log_scan_event(request: Request, *, endpoint: str, decision: str, result: dict[str, Any]) -> None:
     """Emit a single-line JSON log entry for observability."""
 
@@ -517,25 +598,78 @@ def create_app() -> FastAPI:
         if settings.upstream_api_key and upstream_mode == "openai":
             headers["Authorization"] = f"Bearer {settings.upstream_api_key}"
 
+        if bool(upstream_payload.get("stream")):
+            stream_client = build_async_client()
+            try:
+                upstream_request = stream_client.build_request(
+                    "POST", upstream_url, json=upstream_payload, headers=headers
+                )
+                upstream_response = await stream_client.send(upstream_request, stream=True)
+                upstream_response.raise_for_status()
+
+                async def stream_response():
+                    scanned_output = ""
+                    pending = b""
+                    try:
+                        async for chunk in upstream_response.aiter_bytes():
+                            pending += chunk
+                            frames, pending = pop_complete_stream_frames(pending, mode=upstream_mode)
+                            for frame in frames:
+                                if settings.scan_output:
+                                    output_delta = sanitize_text(extract_stream_chunk_text(frame, mode=upstream_mode))
+                                    if output_delta:
+                                        scanned_output = sanitize_text(scanned_output + output_delta)
+                                        output_result = scanner.scan(scanned_output)
+                                        if output_result["is_malicious"]:
+                                            blocked = build_scan_response(output_result, allowed_status="blocked_output")
+                                            blocked["reason"] = "Upstream response blocked during streaming output scan"
+                                            log_scan_event(
+                                                request,
+                                                endpoint="/proxy",
+                                                decision="blocked_stream_output",
+                                                result=blocked,
+                                            )
+                                            yield build_stream_block_event(blocked, mode=upstream_mode)
+                                            return
+                                yield frame
+                        if pending:
+                            if settings.scan_output:
+                                output_delta = sanitize_text(extract_stream_chunk_text(pending, mode=upstream_mode))
+                                if output_delta:
+                                    scanned_output = sanitize_text(scanned_output + output_delta)
+                                    output_result = scanner.scan(scanned_output)
+                                    if output_result["is_malicious"]:
+                                        blocked = build_scan_response(output_result, allowed_status="blocked_output")
+                                        blocked["reason"] = "Upstream response blocked during streaming output scan"
+                                        log_scan_event(
+                                            request,
+                                            endpoint="/proxy",
+                                            decision="blocked_stream_output",
+                                            result=blocked,
+                                        )
+                                        yield build_stream_block_event(blocked, mode=upstream_mode)
+                                        return
+                            yield pending
+                        log_scan_event(request, endpoint="/proxy", decision="forwarded_stream", result=response)
+                    finally:
+                        await upstream_response.aclose()
+                        await stream_client.aclose()
+
+                return StreamingResponse(
+                    stream_response(),
+                    status_code=upstream_response.status_code,
+                    media_type=upstream_response.headers.get("content-type", "text/event-stream"),
+                )
+            except httpx.HTTPStatusError as exc:
+                await stream_client.aclose()
+                detail = exc.response.text[:1000] if exc.response is not None else "Upstream returned an error."
+                raise HTTPException(status_code=502, detail=f"Upstream error: {detail}") from exc
+            except httpx.HTTPError as exc:
+                await stream_client.aclose()
+                raise HTTPException(status_code=502, detail="Unable to reach upstream model endpoint.") from exc
+
         async with build_async_client() as client:
             try:
-                if bool(upstream_payload.get("stream")):
-                    upstream_request = client.build_request("POST", upstream_url, json=upstream_payload, headers=headers)
-                    upstream_response = await client.send(upstream_request, stream=True)
-                    upstream_response.raise_for_status()
-
-                    async def stream_response():
-                        async for chunk in upstream_response.aiter_bytes():
-                            yield chunk
-                        await upstream_response.aclose()
-
-                    log_scan_event(request, endpoint="/proxy", decision="forwarded_stream", result=response)
-                    return StreamingResponse(
-                        stream_response(),
-                        status_code=upstream_response.status_code,
-                        media_type=upstream_response.headers.get("content-type", "text/event-stream"),
-                    )
-
                 upstream_response = await client.post(upstream_url, json=upstream_payload, headers=headers)
                 upstream_response.raise_for_status()
             except httpx.HTTPStatusError as exc:

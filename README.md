@@ -7,7 +7,7 @@ It now supports:
 - `POST /guard` for scan-only decisions
 - `POST /guard/files` for scan-only file upload inspection
 - `POST /proxy` as a real reverse proxy for OpenAI-compatible chat endpoints and local Ollama
-- Input blocking plus optional output scanning on non-streaming responses
+- Input blocking plus optional output scanning on non-streaming and streaming responses
 - Attachment preflight checks for base64/data-URL images, PDFs, Office/archive-like files, and executable masquerades
 - API-key auth, in-memory rate limiting, JSON request logs, and persisted scanner artifacts
 - A Gradio demo mounted at `/demo`
@@ -81,7 +81,7 @@ Important settings:
 - `APID_UPSTREAM_URL`: upstream base URL or full chat endpoint
 - `APID_UPSTREAM_API_KEY`: bearer token for OpenAI-compatible upstreams
 - `APID_UPSTREAM_MODEL`: default model if the caller omits one
-- `APID_SCAN_OUTPUT`: scan non-streaming upstream responses before returning them
+- `APID_SCAN_OUTPUT`: scan upstream responses before returning them, including streaming chunks
 - `APID_MAX_ATTACHMENT_BYTES`: maximum decoded size per inspected attachment, default `5242880`
 - `APID_MAX_ATTACHMENT_TEXT_CHARS`: maximum printable hidden text extracted per attachment, default `12000`
 - `APID_ENABLE_DEMO`: mount the Gradio demo UI at `/demo`, default `true`
@@ -107,7 +107,7 @@ curl -X POST http://127.0.0.1:8000/proxy ^
   -d "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"Tell me a joke about logs\"}]}"
 ```
 
-Streaming is supported by passing `"stream": true`.
+Streaming is supported by passing `"stream": true`. When `APID_SCAN_OUTPUT` is enabled, APID scans streamed assistant output before forwarding each parsed text chunk and emits a terminal block event if the stream becomes malicious.
 
 Scan uploaded files before they are used with a model:
 
@@ -150,5 +150,4 @@ APID is licensed under the Apache License 2.0. See `LICENSE` for details.
 ## Current Limitations/ Will be fixed asap(Top priority)!!
 
 - Rate limiting is in-memory, so it is per-process rather than distributed
-- Output scanning is only applied to non-streaming responses
 - The bundled dataset is still small and should be expanded/versioned for production accuracy

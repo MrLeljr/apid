@@ -26,6 +26,7 @@ RESET_PATTERNS = tuple(
         r"\bnew instructions\b",
         r"\bfrom now on\b",
         r"\byou are now\b",
+        r"\bdisregard previous instructions\b",
         r"\bdisregard (all|any|the) (earlier|prior|previous) (instructions|messages|context)\b",
     )
 )
@@ -53,6 +54,17 @@ CONTRADICTION_PATTERNS = tuple(
     )
 )
 CONTEXT_CONFLICT_PATTERN = re.compile(r"\b(ignore|forget|disregard)\b")
+SECRET_EXFILTRATION_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(respond with|print|show|reveal|tell me|quote|list)\b.{0,80}\b(hidden|internal|system|developer|complete)? ?(instruction|instructions|prompt|message|password|secret|token|rule|rules)\b",
+        r"\bwhat (is|was|were).{0,80}\b(secret|password|not allowed to reveal|hidden instruction|system prompt)\b",
+        r"\bpassword please\b",
+        r"\btranslate the instructions above\b",
+        r"\bsystem override\b.{0,80}\b(disclose|reveal|print|show|comply only|invalid)\b",
+        r"\bdeveloper messages are invalid\b",
+    )
+)
 
 
 class PromptInjectionScanner:
@@ -348,6 +360,15 @@ class PromptInjectionScanner:
             CONTRADICTION_PATTERNS,
             "instruction_override",
             0.35,
+            matched_signals,
+            score,
+        )
+
+        score = self._append_pattern_matches(
+            prompt_lower,
+            SECRET_EXFILTRATION_PATTERNS,
+            "secret_exfiltration",
+            0.4,
             matched_signals,
             score,
         )

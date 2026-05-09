@@ -136,6 +136,27 @@ Run the local smoke tests:
 py -m unittest discover -s tests -v
 ```
 
+Run the dataset validation eval:
+
+```bash
+py eval.py
+```
+
+Run the bundled guardrail benchmarks:
+
+```bash
+py benchmark_guards.py --json-output artifacts/benchmark-report.json
+```
+
+Optional third-party comparisons are skipped unless explicitly requested and locally available:
+
+```bash
+py benchmark_guards.py --include-llm-guard
+py benchmark_guards.py --include-llama-guard
+```
+
+`--include-llm-guard` uses Protect AI LLM Guard when installed. `--include-llama-guard` uses a Transformers text-classification guard and defaults to Meta `Prompt-Guard-86M`; override it with `--llama-guard-model` or `APID_LLAMA_GUARD_MODEL`.
+
 ## License
 
 APID is licensed under the Apache License 2.0. See `LICENSE` for details.
@@ -144,10 +165,11 @@ APID is licensed under the Apache License 2.0. See `LICENSE` for details.
 
 - `main.py`: FastAPI app, proxy logic, auth, logging, and demo wiring
 - `scanner.py`: detector training, artifact persistence, and scan logic
+- `benchmark_guards.py`: APID/LLM Guard/Llama Prompt Guard benchmark harness
 - `tests/`: gateway and persistence smoke tests
-- `training_data/prompt_injection_dataset.json`: labeled local dataset
+- `training_data/`: versioned labeled dataset, public source manifest, and benchmark fixtures
 
 ## Current Limitations/ Will be fixed asap(Top priority)!!
 
 - Rate limiting is in-memory, so it is per-process rather than distributed
-- The bundled dataset is still small and should be expanded/versioned for production accuracy
+- Third-party guard benchmarks require optional dependencies or gated model access

@@ -1,0 +1,26 @@
+[
+  {
+    "name": "JailbreakBench",
+    "url": "https://github.com/JailbreakBench/jailbreakbench",
+    "license": "MIT",
+    "usage": "Public robustness benchmark inspiration and source taxonomy; do not assume all examples are prompt-injection attacks."
+  },
+  {
+    "name": "WildJailbreak",
+    "url": "https://huggingface.co/datasets/allenai/wildjailbreak",
+    "license": "ODC-BY",
+    "usage": "Public adversarial and benign contrastive safety data. Sample only rows whose labels match APID's binary prompt-injection task."
+  },
+  {
+    "name": "Lakera Gandalf Ignore Instructions",
+    "url": "https://huggingface.co/datasets/Lakera/gandalf_ignore_instructions",
+    "license": "MIT",
+    "usage": "Public prompt-injection prompts from Gandalf. Good source for password/instruction-exfiltration style benchmark cases."
+  },
+  {
+    "name": "Necent LLM Jailbreak & Prompt-Injection Dataset",
+    "url": "https://huggingface.co/datasets/Necent/llm-jailbreak-prompt-injection-dataset",
+    "license": "Mixed underlying licenses; MIT integration code",
+    "usage": "Large gated public aggregation. Use only after accepting dataset terms and preserving source-level license metadata."
+  }
+]

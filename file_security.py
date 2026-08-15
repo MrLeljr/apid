@@ -172,7 +172,8 @@ def extract_printable_text(data: bytes, max_chars: int) -> str:
 def inspect_file_candidate(candidate: FileCandidate, *, max_bytes: int, max_extracted_chars: int) -> dict[str, Any]:
     """Inspect one decoded attachment and return a structured result."""
 
-    magic_type = detect_magic(candidate.data)
+    scan_data = candidate.data[: max_bytes + 1]
+    magic_type = detect_magic(scan_data)
     findings: list[dict[str, str]] = []
     declared_type = (candidate.mime_type or "").lower()
     filename = (candidate.filename or "").lower()
@@ -181,7 +182,7 @@ def inspect_file_candidate(candidate: FileCandidate, *, max_bytes: int, max_extr
         findings.append({"type": "oversized_attachment", "detail": f"decoded file is {len(candidate.data)} bytes"})
 
     for magic, label in EXECUTABLE_MAGIC:
-        if candidate.data.startswith(magic):
+        if scan_data.startswith(magic):
             findings.append({"type": "executable_content", "detail": label})
 
     if declared_type.startswith(("image/", "application/pdf")) and magic_type in {
@@ -198,7 +199,7 @@ def inspect_file_candidate(candidate: FileCandidate, *, max_bytes: int, max_extr
     }:
         findings.append({"type": "file_type_mismatch", "detail": f"filename {filename}, detected {magic_type}"})
 
-    lowered_data = candidate.data.lower()
+    lowered_data = scan_data.lower()
     for signature, label in ACTIVE_SIGNATURES:
         if signature.lower() in lowered_data:
             findings.append({"type": "active_embedded_content", "detail": label})
@@ -210,5 +211,5 @@ def inspect_file_candidate(candidate: FileCandidate, *, max_bytes: int, max_extr
         "detected_type": magic_type,
         "size_bytes": len(candidate.data),
         "findings": findings,
-        "extracted_text": extract_printable_text(candidate.data, max_extracted_chars),
+        "extracted_text": extract_printable_text(scan_data, max_extracted_chars),
     }

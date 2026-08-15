@@ -8,11 +8,11 @@ import os
 import time
 import uuid
 from collections import defaultdict, deque
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
-import gradio as gr
 import httpx
 import uvicorn
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
@@ -21,7 +21,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from file_security import FileCandidate, inspect_file_candidate, iter_file_candidates
-from scanner import PromptInjectionScanner
+
+if TYPE_CHECKING:
+    from scanner import PromptInjectionScanner
 
 
 APP_TITLE = "LLM Firewall - Prompt Injection Detector"
@@ -45,8 +47,8 @@ class Settings:
         self.scan_output = os.getenv("APID_SCAN_OUTPUT", "true").strip().lower() in {"1", "true", "yes", "on"}
         self.max_attachment_bytes = max(1024, int(os.getenv("APID_MAX_ATTACHMENT_BYTES", str(5 * 1024 * 1024))))
         self.max_attachment_text_chars = max(256, int(os.getenv("APID_MAX_ATTACHMENT_TEXT_CHARS", "12000")))
-        self.enable_demo = os.getenv("APID_ENABLE_DEMO", "true").strip().lower() in {"1", "true", "yes", "on"}
-        self.use_transformer_embeddings = os.getenv("APID_USE_TRANSFORMER_EMBEDDINGS", "true").strip().lower() in {
+        self.enable_demo = os.getenv("APID_ENABLE_DEMO", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self.use_transformer_embeddings = os.getenv("APID_USE_TRANSFORMER_EMBEDDINGS", "false").strip().lower() in {
             "1",
             "true",
             "yes",
@@ -57,10 +59,18 @@ class Settings:
 
 settings = Settings()
 logging.basicConfig(level=os.getenv("APID_LOG_LEVEL", "INFO").upper(), format="%(message)s")
-scanner = PromptInjectionScanner(
-    artifact_path=settings.model_artifact_path,
-    use_transformer_embeddings=settings.use_transformer_embeddings,
-)
+
+
+@lru_cache(maxsize=1)
+def get_scanner() -> "PromptInjectionScanner":
+    """Create the scanner only when an endpoint actually needs it."""
+
+    from scanner import PromptInjectionScanner
+
+    return PromptInjectionScanner(
+        artifact_path=settings.model_artifact_path,
+        use_transformer_embeddings=settings.use_transformer_embeddings,
+    )
 
 
 class PromptRequest(BaseModel):
@@ -91,6 +101,16 @@ def sanitize_text(value: str | None) -> str:
     return cleaned
 
 
+def append_scan_window(current: str, delta: str, *, max_chars: int | None = None) -> str:
+    """Keep only the bounded text suffix needed for streaming output scans."""
+
+    limit = max_chars or settings.max_prompt_chars
+    updated = current + str(delta).replace("\x00", "")
+    if len(updated) > limit:
+        updated = updated[-limit:]
+    return updated
+
+
 def build_scan_response(result: dict[str, object], *, allowed_status: str) -> dict[str, object]:
     """Return a consistent API payload for allow/block decisions."""
 
@@ -106,7 +126,7 @@ def build_scan_response(result: dict[str, object], *, allowed_status: str) -> di
 def demo_scan(prompt: str, context: str) -> str:
     """Render a compact human-readable summary for the Gradio demo."""
 
-    result = scanner.scan(sanitize_text(prompt), context=normalize_context(context))
+    result = get_scanner().scan(sanitize_text(prompt), context=normalize_context(context))
     classifier = result["layers"]["layer_1_classifier"]
     semantic = result["layers"]["layer_2_semantic"]
     behavioral = result["layers"]["layer_3_behavioral_contextual"]
@@ -121,8 +141,10 @@ def demo_scan(prompt: str, context: str) -> str:
     )
 
 
-def build_demo() -> gr.Blocks:
+def build_demo() -> Any:
     """Create the Gradio playground mounted under `/demo`."""
+
+    import gradio as gr
 
     with gr.Blocks(title="LLM Firewall Demo") as demo:
         gr.Markdown(
@@ -237,7 +259,7 @@ def inspect_attachment_candidates(candidates: list[FileCandidate]) -> dict[str, 
         extracted_text = sanitize_text(inspection.pop("extracted_text", ""))
         text_scan = None
         if extracted_text:
-            text_scan = scanner.scan(extracted_text)
+            text_scan = get_scanner().scan(extracted_text)
             inspection["text_scan"] = {
                 "is_malicious": text_scan["is_malicious"],
                 "risk_score": text_scan["risk_score"],
@@ -511,7 +533,7 @@ def create_app() -> FastAPI:
 
         prompt = sanitize_text(prompt_request.prompt)
         context = normalize_context(prompt_request.context)
-        result = scanner.scan(prompt, context=context)
+        result = get_scanner().scan(prompt, context=context)
         response = build_scan_response(result, allowed_status="allowed")
         log_scan_event(request, endpoint="/guard", decision=response["status"], result=response)
         if result["is_malicious"]:
@@ -532,7 +554,7 @@ def create_app() -> FastAPI:
         prompt_text = sanitize_text(prompt)
         prompt_result = None
         if prompt_text:
-            prompt_result = scanner.scan(prompt_text, context=normalize_context(context))
+            prompt_result = get_scanner().scan(prompt_text, context=normalize_context(context))
             if prompt_result["is_malicious"]:
                 response = build_scan_response(prompt_result, allowed_status="allowed")
                 log_scan_event(request, endpoint="/guard/files", decision="blocked_input", result=response)
@@ -585,7 +607,7 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=403, content=attachment_result)
 
         prompt, context = extract_prompt_context(payload)
-        result = scanner.scan(prompt, context=context)
+        result = get_scanner().scan(prompt, context=context)
         response = build_scan_response(result, allowed_status="forwarded")
         if result["is_malicious"]:
             log_scan_event(request, endpoint="/proxy", decision="blocked_input", result=response)
@@ -610,6 +632,7 @@ def create_app() -> FastAPI:
                 async def stream_response():
                     scanned_output = ""
                     pending = b""
+                    output_scanner = get_scanner() if settings.scan_output else None
                     try:
                         async for chunk in upstream_response.aiter_bytes():
                             pending += chunk
@@ -618,8 +641,8 @@ def create_app() -> FastAPI:
                                 if settings.scan_output:
                                     output_delta = sanitize_text(extract_stream_chunk_text(frame, mode=upstream_mode))
                                     if output_delta:
-                                        scanned_output = sanitize_text(scanned_output + output_delta)
-                                        output_result = scanner.scan(scanned_output)
+                                        scanned_output = append_scan_window(scanned_output, output_delta)
+                                        output_result = output_scanner.scan(scanned_output)
                                         if output_result["is_malicious"]:
                                             blocked = build_scan_response(output_result, allowed_status="blocked_output")
                                             blocked["reason"] = "Upstream response blocked during streaming output scan"
@@ -636,8 +659,8 @@ def create_app() -> FastAPI:
                             if settings.scan_output:
                                 output_delta = sanitize_text(extract_stream_chunk_text(pending, mode=upstream_mode))
                                 if output_delta:
-                                    scanned_output = sanitize_text(scanned_output + output_delta)
-                                    output_result = scanner.scan(scanned_output)
+                                    scanned_output = append_scan_window(scanned_output, output_delta)
+                                    output_result = output_scanner.scan(scanned_output)
                                     if output_result["is_malicious"]:
                                         blocked = build_scan_response(output_result, allowed_status="blocked_output")
                                         blocked["reason"] = "Upstream response blocked during streaming output scan"
@@ -682,7 +705,7 @@ def create_app() -> FastAPI:
         if settings.scan_output:
             output_text = sanitize_text(extract_response_text(data, mode=upstream_mode))
             if output_text:
-                output_result = scanner.scan(output_text)
+                output_result = get_scanner().scan(output_text)
                 if output_result["is_malicious"]:
                     blocked = build_scan_response(output_result, allowed_status="blocked_output")
                     blocked["reason"] = "Upstream response blocked after output scan"
@@ -693,6 +716,8 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=upstream_response.status_code, content=data)
 
     if settings.enable_demo:
+        import gradio as gr
+
         return gr.mount_gradio_app(api, build_demo(), path="/demo")
     return api
 

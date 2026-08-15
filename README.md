@@ -10,7 +10,7 @@ It now supports:
 - Input blocking plus optional output scanning on non-streaming and streaming responses
 - Attachment preflight checks for base64/data-URL images, PDFs, Office/archive-like files, and executable masquerades
 - API-key auth, in-memory rate limiting, JSON request logs, and persisted scanner artifacts
-- A Gradio demo mounted at `/demo`
+- An optional Gradio demo mounted at `/demo`
 
 ## How It Works
 
@@ -38,6 +38,12 @@ Install dependencies:
 py -m pip install -r requirements.txt
 ```
 
+Optional demo UI and transformer embeddings:
+
+```bash
+py -m pip install -r requirements-optional.txt
+```
+
 Run locally:
 
 ```bash
@@ -48,7 +54,7 @@ Open:
 
 - API: `http://127.0.0.1:8000`
 - Health: `http://127.0.0.1:8000/health`
-- Demo: `http://127.0.0.1:8000/demo`
+- Demo, when enabled: `http://127.0.0.1:8000/demo`
 
 ## Proxy Configuration
 
@@ -84,8 +90,8 @@ Important settings:
 - `APID_SCAN_OUTPUT`: scan upstream responses before returning them, including streaming chunks
 - `APID_MAX_ATTACHMENT_BYTES`: maximum decoded size per inspected attachment, default `5242880`
 - `APID_MAX_ATTACHMENT_TEXT_CHARS`: maximum printable hidden text extracted per attachment, default `12000`
-- `APID_ENABLE_DEMO`: mount the Gradio demo UI at `/demo`, default `true`
-- `APID_USE_TRANSFORMER_EMBEDDINGS`: disable with `false` for lighter local/test runs
+- `APID_ENABLE_DEMO`: mount the optional Gradio demo UI at `/demo`, default `false`
+- `APID_USE_TRANSFORMER_EMBEDDINGS`: enable optional sentence-transformer embeddings, default `false`
 
 ## API Examples
 

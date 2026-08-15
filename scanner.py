@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Pattern, Sequence
 
 import numpy as np
 from joblib import dump, load
-from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.linear_model import LogisticRegression
 
@@ -110,6 +109,8 @@ class PromptInjectionScanner:
         self.model = None
         if use_transformer_embeddings:
             try:
+                from sentence_transformers import SentenceTransformer
+
                 self.model = SentenceTransformer(model_name, local_files_only=True)
                 self.embedding_backend = f"sentence_transformer:{model_name}"
             except Exception:
